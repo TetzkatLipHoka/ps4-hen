@@ -12,14 +12,10 @@
 
 #define PAGE_SIZE 0x4000
 
-extern void *(*malloc)(unsigned long size, void *type, int flags)PAYLOAD_BSS;
-extern void (*free)(void *addr, void *type) PAYLOAD_BSS;
 extern char *(*strstr)(const char *haystack, const char *needle)PAYLOAD_BSS;
 extern void *(*memcpy)(void *dst, const void *src, size_t len)PAYLOAD_BSS;
 extern size_t (*strlen)(const char *str) PAYLOAD_BSS;
 
-extern void *M_TEMP PAYLOAD_BSS;
-extern uint8_t *MINI_SYSCORE_SELF_BINARY PAYLOAD_BSS;
 extern struct sbl_map_list_entry **SBL_DRIVER_MAPPED_PAGES PAYLOAD_BSS;
 
 extern int (*sceSblACMgrGetPathId)(const char *path) PAYLOAD_BSS;
@@ -56,14 +52,6 @@ static const uint8_t s_auth_info_for_dynlib[] PAYLOAD_RDATA = {
 };
 
 // clang-format on
-
-PAYLOAD_CODE static inline void *alloc(uint32_t size) {
-  return malloc(size, M_TEMP, 2);
-}
-
-PAYLOAD_CODE static inline void dealloc(void *addr) {
-  free(addr, M_TEMP);
-}
 
 PAYLOAD_CODE static struct sbl_map_list_entry *sceSblDriverFindMappedPageListByGpuVa(vm_offset_t gpu_va) {
   struct sbl_map_list_entry *entry;
@@ -219,52 +207,15 @@ error:
 }
 
 PAYLOAD_CODE static inline int auth_self_header(struct self_context *ctx) {
-  struct self_header *hdr;
-  unsigned int old_total_header_size, new_total_header_size;
-  int old_format;
-  uint8_t *tmp;
-  int is_unsigned;
-  int result;
-
-  is_unsigned = ctx->format == SELF_FORMAT_ELF || is_fake_self(ctx);
-  if (is_unsigned) {
-    old_format = ctx->format;
-    old_total_header_size = ctx->total_header_size;
-
-    // take a header from mini-syscore.elf
-    hdr = (struct self_header *)MINI_SYSCORE_SELF_BINARY;
-
-    new_total_header_size = hdr->header_size + hdr->meta_size;
-
-    tmp = (uint8_t *)alloc(new_total_header_size);
-    if (!tmp) {
-      result = ENOMEM;
-      goto error;
-    }
-
-    // temporarily swap an our header with a header from a real SELF file
-    memcpy(tmp, ctx->header, new_total_header_size);
-    memcpy(ctx->header, hdr, new_total_header_size);
-
-    // it's now SELF, not ELF or whatever...
-    ctx->format = SELF_FORMAT_SELF;
-    ctx->total_header_size = new_total_header_size;
-
-    // call the original method using a real SELF file
-    result = sceSblAuthMgrVerifyHeader(ctx);
-
-    // restore everything we did before
-    memcpy(ctx->header, tmp, new_total_header_size);
-    ctx->format = old_format;
-    ctx->total_header_size = old_total_header_size;
-
-    dealloc(tmp);
-  } else {
-    result = sceSblAuthMgrVerifyHeader(ctx);
+  // Unsigned ELF / fake SELF never reach SAMU for segment or block loading
+  // either (see my_sceSblAuthMgrSmLoadSelfSegment/Block below), so there is
+  // nothing for a real header-signature check to protect here. Skip the
+  // mini-syscore.elf header borrow + real SAMU roundtrip entirely instead of
+  // faking a pass for a check whose result is never used.
+  if (ctx->format == SELF_FORMAT_ELF || is_fake_self(ctx)) {
+    return 0;
   }
-
-error:
-  return result;
+  return sceSblAuthMgrVerifyHeader(ctx);
 }
 
 PAYLOAD_CODE int my_sceSblAuthMgrIsLoadable2(struct self_context *ctx, struct self_auth_info *old_auth_info, int path_id, struct self_auth_info *new_auth_info) {
